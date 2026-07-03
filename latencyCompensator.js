@@ -345,6 +345,67 @@ function mean(values) {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
+function getCurrentlyPlayingSegment(tech) {
+  const playlist = tech.vhs.playlists.media();
+  if (!playlist || !playlist.segments || playlist.segments.length === 0) {
+    return null;
+  }
+
+  const snapshotTime = tech.currentTime();
+
+  // Find the first segment whose end is past the playhead.
+  for (let i = 0; i < playlist.segments.length; i += 1) {
+    // Note: segment.end may be undefined when not yet buffered.
+    if (snapshotTime < playlist.segments[i].end) {
+      return playlist.segments[i];
+    }
+  }
+
+  return playlist.segments[0];
+}
+
+// ---- Rebuffer memory persistence ----
+// A page reload should not reset learned caution: events are stored in
+// sessionStorage and restored (age-pruned) at construction. All storage
+// access is failure-tolerant — missing or broken sessionStorage (Node,
+// sandboxed iframes, private modes) silently degrades to in-memory only.
+
+function loadPersistedRebufferEvents() {
+  try {
+    if (typeof window === "undefined" || !window.sessionStorage) {
+      return [];
+    }
+    const raw = window.sessionStorage.getItem(REBUFFER_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const events = JSON.parse(raw);
+    if (!Array.isArray(events)) {
+      return [];
+    }
+    const cutoff = Date.now() - BUFFERING_AMNESTY_DURATION;
+    return events
+      .filter((e) => e && typeof e.atMs === "number" && e.atMs > cutoff)
+      .map((e) => ({
+        latencyMs: Number.isFinite(e.latencyMs) ? e.latencyMs : null,
+        atMs: e.atMs,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function persistRebufferEvents(events) {
+  try {
+    if (typeof window === "undefined" || !window.sessionStorage) {
+      return;
+    }
+    window.sessionStorage.setItem(REBUFFER_STORAGE_KEY, JSON.stringify(events));
+  } catch {
+    // Storage full or forbidden; in-memory behavior is the fallback.
+  }
+}
+
 class LatencyCompensator {
   constructor(player, options = {}) {
     this.player = player;
@@ -425,22 +486,21 @@ class LatencyCompensator {
   // recent sightings is the least-delayed bound and under-reports latency —
   // the conservative direction.
   observeClockSkew(playlist) {
-    for (let i = playlist.segments.length - 1; i >= 0; i--) {
+    for (let i = playlist.segments.length - 1; i >= 0; i -= 1) {
       const segment = playlist.segments[i];
-      if (!segment.dateTimeObject) {
-        continue;
-      }
-      const key = segment.dateTimeObject.getTime();
-      if (key !== this.lastSkewSightingKey) {
-        this.lastSkewSightingKey = key;
-        this.skewSightings.push(
-          key + (segment.duration || 0) * 1000 - Date.now()
-        );
-        if (this.skewSightings.length > SKEW_SIGHTING_WINDOW) {
-          this.skewSightings.shift();
+      if (segment.dateTimeObject) {
+        const key = segment.dateTimeObject.getTime();
+        if (key !== this.lastSkewSightingKey) {
+          this.lastSkewSightingKey = key;
+          this.skewSightings.push(
+            key + (segment.duration || 0) * 1000 - Date.now()
+          );
+          if (this.skewSightings.length > SKEW_SIGHTING_WINDOW) {
+            this.skewSightings.shift();
+          }
         }
+        return;
       }
-      return;
     }
   }
 
@@ -1077,7 +1137,7 @@ class LatencyCompensator {
       representations.forEach((rep) => {
         rep.enabled(pinned ? rep === lowest : true);
       });
-    } catch (err) {
+    } catch {
       // Renditions API unavailable; quality pinning is best-effort.
     }
   }
@@ -1120,67 +1180,6 @@ class LatencyCompensator {
     };
 
     this.onStats(stats);
-  }
-}
-
-function getCurrentlyPlayingSegment(tech) {
-  const playlist = tech.vhs.playlists.media();
-  if (!playlist || !playlist.segments || playlist.segments.length === 0) {
-    return null;
-  }
-
-  const snapshotTime = tech.currentTime();
-
-  // Find the first segment whose end is past the playhead.
-  for (const segment of playlist.segments) {
-    // Note: segment.end may be undefined when not yet buffered.
-    if (snapshotTime < segment.end) {
-      return segment;
-    }
-  }
-
-  return playlist.segments[0];
-}
-
-// ---- Rebuffer memory persistence ----
-// A page reload should not reset learned caution: events are stored in
-// sessionStorage and restored (age-pruned) at construction. All storage
-// access is failure-tolerant — missing or broken sessionStorage (Node,
-// sandboxed iframes, private modes) silently degrades to in-memory only.
-
-function loadPersistedRebufferEvents() {
-  try {
-    if (typeof window === "undefined" || !window.sessionStorage) {
-      return [];
-    }
-    const raw = window.sessionStorage.getItem(REBUFFER_STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
-    const events = JSON.parse(raw);
-    if (!Array.isArray(events)) {
-      return [];
-    }
-    const cutoff = Date.now() - BUFFERING_AMNESTY_DURATION;
-    return events
-      .filter((e) => e && typeof e.atMs === "number" && e.atMs > cutoff)
-      .map((e) => ({
-        latencyMs: Number.isFinite(e.latencyMs) ? e.latencyMs : null,
-        atMs: e.atMs,
-      }));
-  } catch (err) {
-    return [];
-  }
-}
-
-function persistRebufferEvents(events) {
-  try {
-    if (typeof window === "undefined" || !window.sessionStorage) {
-      return;
-    }
-    window.sessionStorage.setItem(REBUFFER_STORAGE_KEY, JSON.stringify(events));
-  } catch (err) {
-    // Storage full or forbidden; in-memory behavior is the fallback.
   }
 }
 
