@@ -27,21 +27,12 @@
   var isManifestObjectType = function (url) {
     return /application\/vnd\.videojs\.vhs\+json/.test(url);
   };
-  var hlsOptGroup = document.querySelector('[label="hls"]');
-  // var dashOptGroup = document.querySelector('[label="dash"]');
-  // var drmOptGroup = document.querySelector('[label="drm"]');
-  // var liveOptGroup = document.querySelector('[label="live"]');
-  // var llliveOptGroup = document.querySelector('[label="low latency live"]');
-  var manifestOptGroup = document.querySelector(
-    '[label="json manifest object"]'
-  );
+  var sourceSelect = document.getElementById("load-source");
 
   var sourceList;
-  var hlsDataManifest;
-  var dashDataManifest;
 
   var addSourcesToDom = function () {
-    if (!sourceList || !hlsDataManifest || !dashDataManifest) {
+    if (!sourceList) {
       return;
     }
 
@@ -51,42 +42,12 @@
       option.innerText = source.name;
       option.value = source.uri;
 
-      // if (source.keySystems) {
-      //   option.setAttribute(
-      //     "data-key-systems",
-      //     JSON.stringify(source.keySystems, null, 2)
-      //   );
-      // }
-
       if (source.mimetype) {
         option.setAttribute("data-mimetype", source.mimetype);
       }
 
-      if (source.features.indexOf("low-latency") !== -1) {
-        llliveOptGroup.appendChild(option);
-      } else if (source.features.indexOf("live") !== -1) {
-        liveOptGroup.appendChild(option);
-      } else if (source.keySystems) {
-        drmOptGroup.appendChild(option);
-      } else if (source.mimetype === "application/x-mpegurl") {
-        hlsOptGroup.appendChild(option);
-      } else if (source.mimetype === "application/dash+xml") {
-        dashOptGroup.appendChild(option);
-      }
+      sourceSelect.appendChild(option);
     });
-
-    var hlsOption = document.createElement("option");
-    var dashOption = document.createElement("option");
-
-    // dashOption.innerText =
-    //   "Dash Manifest Object Test, does not survive page reload";
-    // dashOption.value = `data:application/vnd.videojs.vhs+json,${dashDataManifest}`;
-    // hlsOption.innerText =
-    //   "HLS Manifest Object Test, does not survive page reload";
-    // hlsOption.value = `data:application/vnd.videojs.vhs+json,${hlsDataManifest}`;
-
-    manifestOptGroup.appendChild(hlsOption);
-    manifestOptGroup.appendChild(dashOption);
   };
 
   var sourcesXhr = new window.XMLHttpRequest();
@@ -97,25 +58,6 @@
   });
   sourcesXhr.open("GET", "./scripts/sources.json");
   sourcesXhr.send();
-
-  var hlsManifestXhr = new window.XMLHttpRequest();
-
-  hlsManifestXhr.addEventListener("load", function () {
-    hlsDataManifest = hlsManifestXhr.responseText;
-    addSourcesToDom();
-  });
-  hlsManifestXhr.open("GET", "./scripts/hls-manifest-object.json");
-  hlsManifestXhr.send();
-
-  var dashManifestXhr = new window.XMLHttpRequest();
-
-  dashManifestXhr.addEventListener("load", function () {
-    dashDataManifest = dashManifestXhr.responseText;
-    addSourcesToDom();
-  });
-  dashManifestXhr.open("GET", "./scripts/dash-manifest-object.json");
-  dashManifestXhr.send();
-
   // all relevant elements
   var urlButton = document.getElementById("load-url");
   var sources = document.getElementById("load-source");

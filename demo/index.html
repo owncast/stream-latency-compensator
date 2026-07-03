@@ -127,14 +127,7 @@
           <span class="input-group-text"
             ><label for="load-source">Preloaded Sources</label></span
           >
-          <select id="load-source" class="form-select">
-            <optgroup label="hls"></optgroup>
-            <optgroup label="dash"></optgroup>
-            <optgroup label="drm"></optgroup>
-            <optgroup label="live"></optgroup>
-            <optgroup label="low latency live"></optgroup>
-            <optgroup label="json manifest object"></optgroup>
-          </select>
+          <select id="load-source" class="form-select"></select>
         </div>
 
         <label for="url" class="form-label">Source URL</label>
@@ -321,6 +314,22 @@
       </div>
 
       <div class="tab-pane" id="player-stats" role="tabpanel">
+        <div class="row mb-3">
+          <div class="col-12">
+            <strong>Latency &amp; buffer, last 5 minutes</strong>
+            <div class="small text-muted mb-1">
+              <span style="color: #0d6efd">&#9632;</span> latency
+              <span style="color: #b6d4fe">&#9632;</span> target band
+              <span style="color: #198754">&#9632;</span> playable buffer
+              <span style="color: #fd7e14">&#9473;</span> buffer floor
+              <span style="color: #dc3545">&#9679;</span> stall
+              <span style="color: #6f42c1">&#9475;</span> seek
+              &middot; speed-up periods shaded yellow
+            </div>
+            <canvas class="latency-chart" style="width: 100%; height: 220px"></canvas>
+          </div>
+        </div>
+
         <div class="row">
           <div class="player-stats col-4">
             <dl>
@@ -351,23 +360,35 @@
               </div>
             </dl>
           </div>
-          <ul id="latency-compensator-stats" class="col-4">
-            <dt>Latency:</dt>
-            <dd class="current-latency-stat">0</dd>
-            <dt>Compensator active:</dt>
-            <dd class="latency-compensator-running">0</dd>
-            <dt>Begins <-> Ends compensating:</dt>
-            <dd class="latency-min-max">0</dd>
-
-              
-             
-              <dt>Playback Rate:</dt>
-              <dd class="current-rate-stat">0</dd>
+          <div id="latency-compensator-stats" class="col-4">
+            <dl class="mb-2">
+              <dt>Decision:</dt>
+              <dd class="decision-stat">-</dd>
+              <dt>Compensating:</dt>
+              <dd class="latency-compensator-running">False</dd>
+              <dt>Latency:</dt>
+              <dd class="current-latency-stat">-</dd>
+              <dt>Target latency (stop &lt;-&gt; start):</dt>
+              <dd class="latency-min-max">-</dd>
+              <dt>Playback rate (actual &rarr; target):</dt>
+              <dd class="current-rate-stat">1.000x</dd>
+              <dt>Buffer (smoothed / floor):</dt>
+              <dd class="buffer-floor-stat">-</dd>
+              <dt>Bandwidth headroom:</dt>
+              <dd class="bandwidth-ratio-stat">measuring&hellip;</dd>
+              <dt>Stable checks:</dt>
+              <dd class="stable-checks-stat">0</dd>
               <dt>Recent Buffering Events:</dt>
               <dd class="buffering-events-stat">0</dd>
               <dt>In Timeout:</dt>
               <dd class="in-timeout-stat">False (<span class="timeout-remaining-stat">0s</span>)</dd>
-          </ul>
+            </dl>
+            <strong>Decision log</strong>
+            <ul
+              class="decision-log list-unstyled small text-muted mb-0"
+              style="height: 9em; overflow-y: auto"
+            ></ul>
+          </div>
 
           <ul id="segment-metadata" class="col-4"></ul>
         </div>

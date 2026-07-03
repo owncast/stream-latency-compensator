@@ -6,7 +6,9 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "preinstall": "cp ../latencyCompensator.js ./scripts/latencyCompensator.js",
-    "start": "python3 -m http.server 8080"
+    "sync": "cp ../latencyCompensator.js ./scripts/latencyCompensator.js",
+    "start": "npm run sync && python3 -m http.server 8080",
+    "stream": "bash local-stream.sh"
   },
   "author": "",
   "license": "ISC",

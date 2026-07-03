@@ -1,5 +1,11 @@
 [
     {
+        "name": "Local Test Stream (npm run stream)",
+        "uri": "./local-hls/master.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": ["live"]
+    },
+    {
         "name": "Owncast Demo Server",
         "uri": "https://watch.owncast.online/hls/stream.m3u8",
         "mimetype": "application/x-mpegurl",
@@ -32,6 +38,60 @@
     {
         "name": "24hr K-Pop",
         "uri": "https://live.24hrkpop.com/hls/stream.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "Mux low-latency live test (non-Owncast, 2s segments, 5 qualities)",
+        "uri": "https://stream.mux.com/v69RSHhFelSm4701snP22dYz2jICy4E4FUyk02rW4gxRM.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "The Indie Beat Television (5s segments)",
+        "uri": "https://tv.theindiebeat.fm/hls/stream.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "Flash-Radio e.V. (1s segments)",
+        "uri": "https://stream.flash-radio.de/hls/stream.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "Nudlan Live Chat (1s segments, 2 qualities)",
+        "uri": "https://live.nudlan.is/hls/stream.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "Rob Radio 204 (3s segments, 4 qualities)",
+        "uri": "https://www.liverobradio204.com/hls/stream.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "Cartoon Cartoons 24/7 (3s segments)",
+        "uri": "https://cartooncartoons.thatsoretro.com/hls/stream.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "Hacklab Jyväskylä (8s segments)",
+        "uri": "https://tv.jkl.hacklab.fi/hls/stream.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "24/7 Vapor Funk Radio (3s segments)",
+        "uri": "https://watch.vapor.fm/hls/stream.m3u8",
+        "mimetype": "application/x-mpegurl",
+        "features": []
+    },
+    {
+        "name": "SashaCam cat webcam (3s segments)",
+        "uri": "https://sashacam.sashanet.net/hls/stream.m3u8",
         "mimetype": "application/x-mpegurl",
         "features": []
     }
