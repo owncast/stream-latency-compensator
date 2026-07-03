@@ -20,9 +20,10 @@ Without intervention, this latency can grow from a few seconds to many seconds o
 
 The Latency Compensator monitors your stream's latency and takes action when you fall too far behind:
 
-1. **Speed Adjustment**: Gradually increases playback speed to catch up
-2. **Forward Jumping**: In extreme cases, skips ahead to get closer to live
-3. **Safety First**: Backs off immediately if there's any risk of buffering
+1. **Speed Adjustment**: Gradually increases playback speed to catch up, tapering back to normal speed as it approaches the target so it never overshoots
+2. **Forward Jumping**: In extreme cases, skips ahead. Jumps are only ever forward, only land inside already-buffered content, and always leave a safety buffer behind
+3. **Buffer First**: Near the live edge, latency can only be reduced by spending buffer. The compensator never spends below a floor derived from the segment duration, and every latency target is subordinate to that floor. When the floor is reached, compensation stops, wherever that leaves you
+4. **Backs Off**: Any rebuffering pauses all compensation and raises the latency target. Too many rebuffering events disable it for the session
 
 ### Video playback requirements
 
@@ -32,6 +33,8 @@ The Latency Compensator monitors your stream's latency and takes action when you
 ### Where will this not work?
 
 You _need_ be using the VideoJS VHS tech for this to work. That means anything using native playback (such as HLS on Safari) are not supported. You will want to check what method of playback tech is being used before you use this.
+
+The bandwidth safety gate also needs to know the stream's bitrate, which comes from the `BANDWIDTH` attribute in the master playlist. Streams served as a bare media playlist with no master never pass the gate, so the compensator stays safely inert on them. Owncast always serves a master playlist.
 
 ## Key Features
 
@@ -43,10 +46,22 @@ You _need_ be using the VideoJS VHS tech for this to work. That means anything u
 
 ### Buffer Protection
 
-- Continuously monitors buffer health and trends
-- Requires a healthy buffer cushion before taking any action
-- Tracks whether the buffer is growing, stable, or shrinking
-- Immediately stops all compensation if buffering occurs
+- Never spends buffer below a floor of `max(1.5 × segment duration, 4s)`
+- Latency targets adapt to what the buffer can afford: the compensator will not chase a wall-clock number the buffer cannot reach
+- Smooths the buffer signal over several samples so the natural per-segment sawtooth never triggers false alarms
+- Immediately stops all compensation if genuine rebuffering occurs. Stalls caused by the viewer seeking are recognized and not held against the stream
+
+### Earned Trust
+
+After 3 continuous minutes with zero rebuffering and solid bandwidth headroom, the safety cushion thins: the buffer floor relaxes to `max(segment duration + 1s, 3s)` and the minimum latency target from 4s to 3s. Catch-ups performed while trusted descend roughly a second closer to live (more on short segments, where the untrusted 4s floor dominates). Trust is revoked instantly by any rebuffer, timeout, or loss of bandwidth headroom, and must be re-earned in full. The trade is explicit: a by-construction margin becomes an evidence-based one, so the `trusted` flag is exposed in stats for anyone rolling this out who wants to count stalls-while-trusted in the wild.
+
+### Wrong Clocks Handled
+
+Latency math needs the viewer's clock and the server's clock to agree. Owncast measures and sets the skew via `setClockSkew`. When that is never called (other VideoJS embedders), the compensator self-estimates from segment publish times and corrects clock errors larger than 10 seconds. Clocks that are minutes off used to make it permanently inert. Well-synced clocks are never perturbed.
+
+### Caution That Survives Reloads
+
+Rebuffering history is kept in `sessionStorage`, so a viewer who buffered and refreshed the page gets a compensator that already knows to be careful, not a fresh aggressive one. Events still expire after 4 minutes. Environments without storage degrade silently to in-memory behavior.
 
 ### Conservative Decision Making
 
@@ -62,6 +77,8 @@ The compensator operates within dynamically calculated zones based on segment du
 - **Comfort Zone**: Close enough to live that no action is needed
 - **Action Zone**: Far enough behind that catching up would be beneficial
 - **Safety Zone**: Maintains a minimum distance from live to prevent buffering
+
+During active compensation the player's renditions are restricted so freed headroom goes toward catching up. The default mode pins to the lowest-bandwidth rendition; `qualityPinMode: "current"` instead only blocks quality upswitches, which is gentler for viewers. All renditions are restored the moment compensation stops, in every mode.
 
 ## Configuration
 
@@ -84,26 +101,75 @@ See the constants at the top of the script for current values and tuning.
 ```javascript
 import LatencyCompensator from "./latencyCompensator.js";
 
-// Initialize with your video.js player instance
-const compensator = new LatencyCompensator(player);
+// Initialize with your video.js player instance. Options are optional:
+// qualityPinMode: "lowest" (default) pins to the cheapest rendition while
+// actively compensating; "current" only blocks quality upswitches.
+const compensator = new LatencyCompensator(player, { qualityPinMode: "lowest" });
 
-// Set clock skew with the time skew in milliseconds from the server
+// Set clock skew with the time skew in milliseconds from the server.
+// Optional: without it, clock errors larger than 10s are self-estimated
+// from segment publish times.
 compensator.setClockSkew(skewInMilliseconds);
 
 // Enable the compensator
 compensator.enable();
 ```
 
+### Watching what it decides
+
+Every check (about every 3 seconds) the compensator reports its state and its
+latest decision through an optional callback:
+
+```javascript
+compensator.onStats = (stats) => {
+  // stats.action is the decision just made: { type, reason } plus
+  // rate (speed) or aheadSec (jump). type is one of:
+  // "speed", "jump", "stop", "timeout", "none", or "idle" when the
+  // compensator cannot run at all (startup grace, paused, no VHS tech).
+  // It is null until the first check has run.
+  if (stats.action) {
+    console.log(stats.action.type, stats.action.reason);
+  }
+
+  // Also included: latency, playbackRate, targetRate, running,
+  // playableBufferSeconds, bufferFloorSeconds, averageBandwidthRatio,
+  // minEndingLatency / maxStartingLatency (the current latency band),
+  // consecutiveStableChecks, bufferingEvents, inTimeout, timeoutRemaining,
+  // and trusted (whether the earned-trust cushion is active).
+};
+```
+
+The `reason` string explains every choice, including inaction, so a stats
+consumer can always answer "why is nothing happening right now".
+
 ## Demo Page
 
-Change to the `demo` directory and install the dependencies and run the demo server. You can then visit `http://localhost:8080` to test the compensator in action with a basic test page.
+Change to the `demo` directory and install the dependencies and run the demo server. You can then visit `http://localhost:8080` to test the compensator in action with a basic test page. The Player Stats tab shows the compensator's current decision and why, the signals feeding it (latency vs. its target band, buffer vs. floor, bandwidth headroom, stability), and a decision log that records each change of behavior. The preloaded source list includes verified public Owncast streams labeled by segment duration, from 1s (the tightest regime) to 8s, alongside the local test stream below.
 
 - `npm install`
 - `npm start`
 
-## Probably not Production ready
+`npm start` re-syncs the demo's copy of `latencyCompensator.js` from the repo root, so edits to the root file are always what the page runs.
 
-This is an early attempt a the above approaches to reduce latency for live playback, however when things go wrong they can often put people's players in a worse place than they started due to re-buffering events. Continued work should be done to make sure attempting to get you closer to live never ends up in these states.
+### Local test stream (no server required)
+
+You do not need Owncast or any remote stream to test. With `ffmpeg` installed, run in a second terminal:
+
+- `npm run stream`
+
+This generates a real sliding-window live HLS stream (test pattern with burned-in wall-clock time, program-date-time tags, master playlist) into `demo/local-hls/`. Pick "Local Test Stream" from the demo page's source list. `SEGMENT_DURATION` (default 2, Owncast's default is 4) and `HLS_LIST_SIZE` (default 6) environment variables control the stream shape. Use your browser dev tools' network throttling to simulate bad connections.
+
+## Testing
+
+The behavioral contract lives in `test/` and runs with `node --test` from the repo root (Node 20+, no dependencies):
+
+- `test/decide.test.js`: table-driven contract tests against the pure `decide()` function, of the form "10s behind live with conditions X must produce action Y", plus a property sweep proving jumps are always forward, always land inside buffered content, and rates stay within bounds
+- `test/scenarios.test.js`: deterministic multi-minute simulations (fake player, fake clock) covering steady networks, degrading bandwidth, jitter, clock skew, pauses, cold starts far behind live, and rebuffer-limit shutdown. Every scenario asserts the safety invariants, including that a viewer with the compensator never stalls more than one without it
+- `test/old-implementation-teeth.test.js`: runs the pre-rewrite implementation through the same harness and proves the suite catches its bugs
+
+## Safety model
+
+The core rule: the compensator must never make the experience worse than not having it at all. Every action is gated on bandwidth headroom, buffer above the floor, and a stable player. When any of those degrade it backs off first and asks questions later. When measurements look absurd (clock problems, long suspends) it does nothing rather than act on bad data. The test suite enforces a zero-added-stalls invariant across every simulated scenario.
 
 ## Contributions
 
@@ -115,45 +181,46 @@ Follow the chart to see how the different decisions are made.
 
 ```mermaid
 flowchart TD
-    A[Latency Occurs] --> B[User behind live edge]
-    B --> C[Compensator Enabled]
-    C --> D[Wait startup period]
-    D --> E[Begin Monitoring]
+    A[Check every 3 seconds] --> B{Startup grace, paused,
+    seeking, or in timeout?}
+    B -- Yes --> Z[Do nothing]
+    B -- No --> C[Gather player state:
+    latency, buffer, bandwidth]
 
-    E --> F{Paused or Timeout?}
-    F -- Yes --> G[Do Nothing]
-    F -- No --> H[Check Network State and Bandwidth]
+    C --> D{Latency measurable
+    and sane?}
+    D -- No --> T[30s timeout]
+    D -- Yes --> E{Buffer critically low?}
+    E -- Yes --> T
+    E -- No --> F{Buffer above floor
+    and not shrinking?}
+    F -- No --> S[Stop compensating]
+    F -- Yes --> G{Latency vs the band
+    the buffer can afford}
 
-    H --> I{Network OK?}
-    I -- No --> G
-    I -- Yes --> J[Check Buffer Health]
+    G -- At or below target --> S
+    G -- Inside band, not running --> Z
+    G -- Above band --> H{Bandwidth headroom?}
+    H -- No --> S
+    H -- Yes --> I{Very far behind and
+    pristine conditions?}
+    I -- Yes --> J[Jump forward, landing inside
+    buffer with floor intact]
+    I -- No --> K{Stable, no recent rebuffers,
+    can afford to start?}
+    K -- No --> Z
+    K -- Yes --> L[Speed up, tapering
+    toward the target]
 
-    J --> K{Buffer Healthy?}
-    K -- No --> L[Stop Compensator and Timeout]
-    K -- Yes --> M[Calculate Latency]
-
-    M --> N{High Latency?}
-    N -- No --> O{Low Latency?}
-    O -- Yes --> P[Stop Compensator]
-    O -- No --> Q[Keep Monitoring]
-    N -- Yes --> R{Can Jump to Live?}
-
-    R -- Yes --> S[Jump Forward]
-    R -- No --> T{Buffer and Bandwidth OK?}
-    T -- No --> L
-    T -- Yes --> U[Speed Up Playback]
-    U --> Q
-
-    S --> Q
-
-    L --> W[Timeout Active]
-    W --> X[Wait and Resume Monitoring]
-
-    subgraph Buffering Handling
-      Y[Buffering Event]
-      Y --> Z[Increase Buffer Counter]
-      Z --> AA{Counter Limit?}
-      AA -- Yes --> AB[Disable Compensator]
-      AA -- No --> AC[Start Timeout]
+    subgraph Rebuffer handling
+      Y[Playback stalls] --> Y1{During a seek
+      or our jump?}
+      Y1 -- Yes --> Y2[Ignore: seek fetch,
+      not starvation]
+      Y1 -- No --> Y3[Rate to 1.0, 30s timeout,
+      record event, raise latency floor]
+      Y3 --> Y4{More than 4 events
+      in 4 minutes?}
+      Y4 -- Yes --> Y5[Disable for the session]
     end
 ```
