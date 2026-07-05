@@ -46,9 +46,10 @@ The bandwidth safety gate also needs to know the stream's bitrate, which comes f
 
 ### Buffer Protection
 
-- Never spends buffer below a floor of `max(1.5 × segment duration, 4s)`
+- Never spends buffer below a floor of `max(1.5 × segment duration, 4s)` — and the floor binds the buffer's recent *trough*, not its average. The raw playable buffer sawtooths a full segment as segments land (and reads an arbitrary phase when the segment duration matches the check cadence), so averaging hides exactly the dips that stall. The trough is what stalls, so the trough is what's budgeted
 - Latency targets adapt to what the buffer can afford: the compensator will not chase a wall-clock number the buffer cannot reach
-- Smooths the buffer signal over several samples so the natural per-segment sawtooth never triggers false alarms
+- Starting a catch-up stays judged on the smoothed buffer (starting is cheap; spending is what's dangerous), so the trough accounting adds safety without making the compensator timid
+- Quality pinning during a catch-up is splice-free: renditions are restricted by flagging playlists directly rather than through the VHS renditions API, whose quality-change path discards the entire forward buffer — a flush at engage or release could stall the very viewer the compensator was helping
 - Immediately stops all compensation if genuine rebuffering occurs. Stalls caused by the viewer seeking are recognized and not held against the stream
 
 ### Earned Trust

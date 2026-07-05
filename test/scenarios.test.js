@@ -26,6 +26,7 @@ import {
   engageEpisodes,
   timeoutEdges,
   specBufferFloor,
+  trustedAt,
 } from "./fake-player.js";
 
 const MIN_RUN_SEC = 300; // every scenario simulates at least 5 minutes
@@ -147,6 +148,144 @@ test("scenario: jitter bursts stay safe -- no backward seeks, no added stalls", 
     segDur: 4,
     offStalls: off.stalls,
     maxEngageEpisodes: 6, // one per burst at most, plus the initial engage
+  });
+});
+
+test("scenario: rev 10 incident -- marginal delivery with abort-cycle stutters adds no stalls", async (t) => {
+  // Live incident, othertv.stream 2026-07-05: 3s segments (phase-locked to
+  // the 3s check cadence, so a MEAN of the buffer samples reads an arbitrary
+  // phase of the sawtooth, not its middle) and a marginal connection whose
+  // ABR kept attempting an upswitch, aborting mid-segment, and re-fetching —
+  // periodic multi-second windows where nothing arrives while the measured
+  // bandwidth ratio still passes the start gate. Mean-based floor accounting
+  // spent the raw trough through the floor and stalled a viewer who was
+  // stall-free uncompensated at 11s latency.
+  //
+  // The parameter grid covers the four stutter alignments that reproduced
+  // the violation on rev 9 plus a benign one; every timeline must satisfy
+  // stalls(with) <= stalls(without) and the full invariant suite.
+  for (const [period, width, phase] of [
+    [19, 4, 5],
+    [23, 4, 5],
+    [23, 4, 10],
+    [25, 4, 5],
+    [21, 3, 0],
+  ]) {
+    await t.test(`stutter period=${period}s width=${width}s phase=${phase}s`, (t2) => {
+      const cfg = {
+        durationSec: 360,
+        segDur: 3,
+        initialLatencySec: 11,
+        initialBufferSec: 8,
+        rateFactor: (tSec) => ((tSec + phase) % period < width ? 0 : 3),
+      };
+      const off = runScenario(t2, { ...cfg, withCompensator: false });
+      const run = runScenario(t2, { ...cfg, Compensator: LatencyCompensator });
+
+      assert.ok(
+        off.stalls.length === 0,
+        "harness: the uncompensated viewer at 11s latency rides out the stutters"
+      );
+      assert.strictEqual(
+        run.stalls.length,
+        0,
+        "the compensator must never add a stall on a stutter-jittered stream"
+      );
+      // The catch-up must still deliver real gain: meaningfully below the
+      // 11s start, while resting with a survivable cushion (the spec floor
+      // for 3s segments) rather than parked on the live edge.
+      const last = run.latencyTrace.at(-1);
+      assert.ok(
+        last.latencyMs < 9_800,
+        `catch-up must gain ground: final latency ${Math.round(last.latencyMs)}ms`
+      );
+      assertInvariants(run, { segDur: 3, offStalls: off.stalls });
+    });
+  }
+});
+
+test("scenario: rev 10 -- quality pin and release are splice-free (no flush, no stall)", (t) => {
+  // Live finding, 2026-07-05: VHS's rendition mixin runs fastQualityChange_
+  // -> resetEverything() on every rep.enabled() state change, discarding the
+  // ENTIRE forward buffer at the exact moments the compensator pins (engage)
+  // and restores (stop) renditions. On a marginal connection the flush at
+  // stop dumped the resting cushion and stalled — the second half of the
+  // user's incident. The compensator must pin via playlist.disabled (applied
+  // at the next natural segment selection) instead; the fake player models
+  // the flush on the enabled() path, so a regression to it stalls here.
+  const cfg = {
+    Compensator: LatencyCompensator,
+    durationSec: 420,
+    segDur: 2,
+    initialLatencySec: 8,
+    initialBufferSec: 6,
+    rateFactor: () => 2.5,
+  };
+  const run = runScenario(t, cfg);
+
+  assert.ok(
+    engageEpisodes(run.rateWrites) >= 1,
+    "harness: compensation must engage so pinning actually happens"
+  );
+  assert.ok(
+    run.renditionWrites.some((w) => w.enabled === false) &&
+      run.renditionWrites.some((w) => w.enabled === true),
+    "harness: a pin and a restore must both have occurred"
+  );
+  assert.strictEqual(
+    run.stalls.length,
+    0,
+    "pinning/restoring renditions must never flush the buffer into a stall"
+  );
+  assert.strictEqual(
+    timeoutEdges(run.stats),
+    0,
+    "pinning/restoring renditions must not collapse the buffer into a timeout"
+  );
+  assertInvariants(run, {
+    segDur: 2,
+    offStalls: [],
+    band: { lastSec: 60 },
+    maxEngageEpisodes: 3,
+  });
+});
+
+test("scenario: rev 10 -- 3s segments phase-locked to the check cadence settle safely", (t) => {
+  // segDur == check interval: every check samples the SAME phase of the
+  // buffer sawtooth, the aliasing case the mean-of-4 smoothing cannot see
+  // through. The trough accounting must still rest with the raw sawtooth
+  // bottom at or above the floor, silently.
+  const cfg = {
+    Compensator: LatencyCompensator,
+    durationSec: 360,
+    segDur: 3,
+    initialLatencySec: 11,
+    initialBufferSec: 8,
+    rateFactor: () => 3,
+  };
+  const run = runScenario(t, cfg);
+
+  assert.strictEqual(run.stalls.length, 0, "healthy network must never stall");
+  assert.ok(
+    engageEpisodes(run.rateWrites) >= 1,
+    "compensation must actually engage from 11s behind"
+  );
+  assert.strictEqual(timeoutEdges(run.stats), 0, "no timeouts on a healthy network");
+  // Ground truth, last 60s: the raw buffer must never dip below the spec
+  // floor by more than the one-model-step allowance — the incident's
+  // signature was exactly this dip.
+  const floorNow = (at) => specBufferFloor(3, trustedAt(run.stats, at));
+  for (const s of run.latencyTrace.filter((x) => x.at >= run.endMs - 60_000)) {
+    assert.ok(
+      s.bufferedAhead >= floorNow(s.at) - 0.35,
+      `raw buffer ${s.bufferedAhead.toFixed(2)}s dipped below the floor at ${s.at}`
+    );
+  }
+  assertInvariants(run, {
+    segDur: 3,
+    offStalls: [],
+    band: { lastSec: 60 },
+    maxEngageEpisodes: 3,
   });
 });
 

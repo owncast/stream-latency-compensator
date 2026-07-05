@@ -94,6 +94,17 @@ export function trustedAt(stats, atMs) {
   return trusted;
 }
 
+// Whether the compensator reported itself actively compensating at a given
+// instant (same last-sample-at-or-before convention as trustedAt).
+export function runningAt(stats, atMs) {
+  let running = false;
+  for (const s of stats) {
+    if (s.at > atMs) break;
+    running = !!s.running;
+  }
+  return running;
+}
+
 // ---- The fake player -------------------------------------------------------
 
 export class FakeLivePlayer {
@@ -142,8 +153,7 @@ export class FakeLivePlayer {
         bandwidth: bw,
         _enabled: true,
       };
-      rep.enabled = (flag) => {
-        if (flag === undefined) return rep._enabled;
+      const record = (flag) => {
         if (rep._enabled !== flag) {
           this.records.renditionWrites.push({
             at: Date.now(),
@@ -153,6 +163,38 @@ export class FakeLivePlayer {
         }
         rep._enabled = flag;
       };
+      // Old path (rev 9 and the vendored old compensator): the rendition
+      // mixin's enabled() -- in real VHS a state CHANGE triggers
+      // fastQualityChange_ -> mainSegmentLoader.resetEverything(), which
+      // discards the entire forward buffer (observed live, rev 10
+      // incident). Modeled here so any code that pins through enabled()
+      // pays the flush and the splice-free playlist.disabled path is the
+      // only stall-free way to pin.
+      rep.enabled = (flag) => {
+        if (flag === undefined) return rep._enabled;
+        if (rep._enabled !== flag) {
+          record(flag);
+          this.flushForwardBuffer();
+        }
+        rep._enabled = flag;
+      };
+      // Rev 10 path: playlist.disabled written (or deleted) directly, the
+      // splice-free restriction. A Proxy records both mutation styles.
+      rep.playlist = new Proxy(
+        {},
+        {
+          set(target, prop, value) {
+            if (prop === "disabled") record(!value);
+            target[prop] = value;
+            return true;
+          },
+          deleteProperty(target, prop) {
+            if (prop === "disabled") record(true);
+            delete target[prop];
+            return true;
+          },
+        }
+      );
       return rep;
     });
 
@@ -198,6 +240,21 @@ export class FakeLivePlayer {
   activeRange() {
     return this.ranges.find(
       (r) => this.playhead >= r.start - 0.25 && this.playhead <= r.end + 1e-9
+    );
+  }
+
+  // VHS resetEverything() as observed live: everything buffered ahead of
+  // the playhead is discarded and must be re-downloaded from the current
+  // position. The playhead keeps whatever instant it is on; the downloader
+  // refills at rateFactor speed from here.
+  flushForwardBuffer() {
+    const r = this.activeRange();
+    if (r) {
+      r.end = Math.max(r.start, this.playhead);
+    }
+    // Ranges ahead of the playhead are gone too.
+    this.ranges = this.ranges.filter(
+      (x) => x === r || x.start <= this.playhead
     );
   }
 
@@ -472,6 +529,17 @@ export function runScenario(t, {
   const steps = Math.round((durationSec * 1000) / MODEL_STEP_MS);
   for (let i = 1; i <= steps; i++) {
     t.mock.timers.tick(MODEL_STEP_MS);
+    // Ground truth is recorded BEFORE the model advances this step: timers
+    // (the compensator's checks) fire at the tick boundary and read the
+    // model in exactly this pre-advance state, so check-time trace lookups
+    // see the same player the compensator saw.
+    if (i % 10 === 0) {
+      latencyTrace.push({
+        at: Date.now(),
+        latencyMs: (model.producedEdge(model.tSec()) - model.playhead) * 1000,
+        bufferedAhead: model.bufferedAhead(),
+      });
+    }
     model.advanceTo(Date.now());
     const tSec = (Date.now() - startMs) / 1000;
     if (comp && enableAtSec > 0 && tSec >= enableAtSec) {
@@ -480,13 +548,6 @@ export function runScenario(t, {
     }
     while (pending.length && pending[0].atSec <= tSec) {
       pending.shift().run(model, comp);
-    }
-    if (i % 10 === 0) {
-      latencyTrace.push({
-        at: Date.now(),
-        latencyMs: (model.producedEdge(model.tSec()) - model.playhead) * 1000,
-        bufferedAhead: model.bufferedAhead(),
-      });
     }
   }
 
@@ -519,6 +580,20 @@ export function timeoutEdges(stats, afterMs = -Infinity) {
   for (const s of stats) {
     if (s.at >= afterMs && s.inTimeout && !prev) edges++;
     prev = s.inTimeout;
+  }
+  return edges;
+}
+
+// Rising edges of the reported running state -- compensation episodes as the
+// spec defines them (pinning is tied to running). This also counts a restart
+// that catches the playback rate mid-descent toward 1.0, which a
+// rate-write-based count (engageEpisodes) misses.
+export function runningEdges(stats, afterMs = -Infinity) {
+  let edges = 0;
+  let prev = false;
+  for (const s of stats) {
+    if (s.at >= afterMs && s.running && !prev) edges++;
+    prev = s.running;
   }
   return edges;
 }
@@ -569,15 +644,17 @@ export function assertInvariants(run, {
   }
 
   // Invariant 3: no speed-up/jump initiated below the floor, and jumps land
-  // keeping the floor. Speed initiation additionally requires the rev 4
-  // entry margin of segDur/2 above the floor (on the smoothed buffer, hence
-  // the sawtooth allowance on this raw sample). Rev 9: the floor in effect
-  // is the one for the trust state the compensator reported when it acted.
+  // keeping the floor. Speed initiation requires the entry margin of
+  // segDur/2 above the floor on the buffer TROUGH (rev 10), so the raw
+  // buffer at the rate write is at least floor + segDur/2 minus what one
+  // ramp-tick of playback (<= ~1.1s) plus model quantization can drain.
+  // Rev 9: the floor in effect is the one for the trust state the
+  // compensator reported when it acted.
   for (const w of run.rateWrites) {
     if (w.from === 1.0 && w.to > 1.0) {
       const f = specBufferFloor(segDur, trustedAt(run.stats, w.at));
       assert.ok(
-        w.bufferedAhead >= Math.max(2, f - segDur / 2 - 0.25) - eps,
+        w.bufferedAhead >= Math.max(2, f + segDur / 2 - 1.5) - eps,
         `speed-up initiated with only ${w.bufferedAhead.toFixed(2)}s buffered ` +
           `(floor ${f}) at ${w.at}`
       );
@@ -614,49 +691,70 @@ export function assertInvariants(run, {
     );
   }
 
-  // Invariant 5 (rev 8): in steady state the resting point either sits
-  // AT/INSIDE the effective band or cannot afford to start
-  // (buf < floor + segDur/2) -- in both cases it is SILENT: no timeout
-  // ping-pong, no new engage/stop transitions, and never below the base
-  // minimum. The harness recomputes the compensator's smoothed buffer view
-  // as the mean of 4 samples spaced 3s apart (phase differences covered by
-  // the 0.25s slack).
+  // Invariant 5 (rev 8, trough semantics since rev 10): in steady state the
+  // resting point either sits AT/INSIDE the effective band or cannot afford
+  // to start (trough < floor + segDur/2) -- in both cases it is SILENT: no
+  // timeout ping-pong, no new engage/stop transitions, and never below the
+  // base minimum. The harness recomputes the compensator's buffer-trough
+  // view from GROUND-TRUTH buffers at the compensator's actual check times
+  // (every stats entry stamps one check), so the reconstruction is exact
+  // to the check phase while staying independent of the reported values.
   if (band) {
     const windowStart = run.endMs - band.lastSec * 1000;
     const trace = run.latencyTrace;
+    // Ground-truth buffer at each 1s trace timestamp, and the deduplicated,
+    // ordered check timestamps (a timeout check emits two stats entries with
+    // the same stamp).
+    const bufAt = new Map(trace.map((x) => [x.at, x.bufferedAhead]));
+    const checkTimes = [...new Set(run.stats.map((x) => x.at))].sort(
+      (a, b) => a - b
+    );
     const windowIdx = trace
       .map((s, i) => [s, i])
-      .filter(([s, i]) => s.at >= windowStart && i >= 9);
+      .filter(([s, i]) => s.at >= windowStart && i >= 11);
     assert.ok(
       windowIdx.length >= 10,
       `expected steady samples in the last ${band.lastSec}s, got ${windowIdx.length}`
     );
-    for (const [s, i] of windowIdx) {
-      const smoothedBuf =
-        (trace[i - 9].bufferedAhead +
-          trace[i - 6].bufferedAhead +
-          trace[i - 3].bufferedAhead +
-          trace[i].bufferedAhead) /
-        4;
+    for (const [s] of windowIdx) {
+      // "Resting point" means resting: while a catch-up glide is still
+      // actively running (rate above 1.0), the sample is convergence tail,
+      // not steady state — the churn and timeout assertions below still
+      // bound the whole window.
+      if (runningAt(run.stats, s.at)) {
+        continue;
+      }
       // Rev 9: the resting expectations follow the trust state the
       // compensator reported at that instant (trusted thins the floor and
       // lowers the base minimum).
       const trusted = trustedAt(run.stats, s.at);
       const f = specBufferFloor(segDur, trusted);
       const { min: baseMin } = specThresholds(segDur, null, trusted);
+      // The buffer windows the compensator saw: ground-truth buffers at its
+      // 4 most recent check times (every stats entry stamps one check, and
+      // the trace records pre-advance state — exactly what a check read).
+      // The START question uses the MEAN of the window, the affordability
+      // gate the TROUGH, mirroring decide()'s start/spend split.
+      const recent = checkTimes.filter((c) => c <= s.at).slice(-4);
+      if (recent.length < 4 || !recent.every((c) => bufAt.has(c))) {
+        continue;
+      }
+      const bufs = recent.map((c) => bufAt.get(c));
+      const meanBuf = bufs.reduce((a, b) => a + b, 0) / bufs.length;
+      const troughBuf = Math.min(...bufs);
       const { max: effMax } = specEffectiveBand(
         segDur,
         null,
         s.latencyMs,
-        smoothedBuf,
+        meanBuf,
         trusted
       );
-      const cannotAffordStart = smoothedBuf < f + segDur / 2 + 0.25;
+      const cannotAffordStart = troughBuf < f + segDur / 2 + 0.25;
       assert.ok(
         s.latencyMs <= effMax + 250 || cannotAffordStart,
         `resting state not silent-by-construction: latency ${Math.round(s.latencyMs)}ms ` +
-          `above effective max ${Math.round(effMax)}ms with ${smoothedBuf.toFixed(2)}s ` +
-          `smoothed buffer at ${s.at}`
+          `above start-band max ${Math.round(effMax)}ms (mean ${meanBuf.toFixed(2)}s, ` +
+          `trough ${troughBuf.toFixed(2)}s at check times) at ${s.at}`
       );
       assert.ok(
         s.latencyMs > baseMin - 250,
@@ -666,8 +764,14 @@ export function assertInvariants(run, {
     for (const s of run.stats.filter((x) => x.at >= windowStart)) {
       assert.ok(!s.inTimeout, `timeout ping-pong: in timeout at ${s.at}`);
     }
+    // Episode counts take the max of both views: rate writes from 1.0 and
+    // rising running edges -- a restart catching the rate mid-descent is
+    // only visible in the latter.
     assert.strictEqual(
-      engageEpisodes(run.rateWrites, run.endMs - 90_000),
+      Math.max(
+        engageEpisodes(run.rateWrites, run.endMs - 90_000),
+        runningEdges(run.stats, run.endMs - 90_000)
+      ),
       0,
       "engage/stop churn: new compensation episode during steady state"
     );
@@ -678,7 +782,10 @@ export function assertInvariants(run, {
     );
   }
   if (maxEngageEpisodes !== null) {
-    const n = engageEpisodes(run.rateWrites);
+    const n = Math.max(
+      engageEpisodes(run.rateWrites),
+      runningEdges(run.stats)
+    );
     assert.ok(
       n <= maxEngageEpisodes,
       `engage/stop churn: ${n} compensation episodes (max ${maxEngageEpisodes})`
@@ -688,9 +795,15 @@ export function assertInvariants(run, {
   // Rev 8: rendition pin/restore flips are bounded by the episodes that
   // caused them -- at most one pin and one restore per catch-up episode. A
   // flip is one pin or restore event (rep writes sharing a timestamp).
+  // Episodes are counted as rising edges of the reported running state: a
+  // restart may catch the rate mid-descent, so the from-1.0 rate-write count
+  // undercounts real (pinned) episodes.
   if (run.comp) {
     const flipEvents = new Set(run.renditionWrites.map((w) => w.at)).size;
-    const episodes = engageEpisodes(run.rateWrites);
+    const episodes = Math.max(
+      runningEdges(run.stats),
+      engageEpisodes(run.rateWrites)
+    );
     assert.ok(
       flipEvents <= 2 * episodes,
       `rendition churn: ${flipEvents} pin/restore flips for ${episodes} episodes`
